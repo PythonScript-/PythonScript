@@ -11,9 +11,18 @@ from ast import NodeVisitor
 
 
 class JSGenerator(NodeVisitor):
+    def visit_In(self, node):
+        return ' in '
+
+    def visit_AugAssign(self, node):
+        a = '%s %s= %s' %(self.visit(node.target), self.visit(node.op), self.visit(node.value))
+        return a
 
     def visit_Module(self, node):
         return '\n'.join(map(self.visit, node.body))
+
+    def visit_Tuple(self, node):
+        return '[%s]' % ', '.join(map(self.visit, node.elts))
 
     def visit_List(self, node):
         return '[%s]' % ', '.join(map(self.visit, node.elts))
@@ -69,6 +78,7 @@ class JSGenerator(NodeVisitor):
                 body.append(self.visit(child))
         buffer += '\n'.join(body)
         buffer += '\n}\n'
+        buffer += 'window["%s"] = %s \n' % (node.name, node.name)  ## export to global namespace so Closure will not remove them
         return buffer
 
     def visit_Subscript(self, node):
@@ -147,6 +157,9 @@ class JSGenerator(NodeVisitor):
         op = self.visit(node.op)
         right = self.visit(node.right)
         return '%s %s %s' % (left, op, right)
+
+    def visit_Mult(self, node):
+        return '*'
 
     def visit_Add(self, node):
         return '+'
@@ -248,7 +261,7 @@ def main(script):
 
 
 def command():
-    print main(sys.stdin.read())
+    print( main(sys.stdin.read()) )
 
 if __name__ == '__main__':
     command()
