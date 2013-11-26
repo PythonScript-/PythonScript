@@ -1977,10 +1977,14 @@ def inspect_function( node ):
 
 
 
-#def main(script):
-#	input = parse(script)
-#	PythonToPythonJS().visit(input)
-#	return writer.getvalue()
+def main(data):
+	compiler = PythonToPythonJS( source=data )
+
+	data = compiler.preprocess_custom_operators( data )
+	compiler.visit( parse(data) )
+
+	output = writer.getvalue()
+	print( output )  ## pipe to stdout
 
 
 def command():
