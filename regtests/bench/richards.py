@@ -11,7 +11,7 @@ Richards
 #  Translation from C++, Mario Wolczko
 #  Outer loop added by Alex Jacoby
 
-from time import time
+from time import clock
 
 # Task IDs
 I_IDLE = 1
@@ -32,14 +32,18 @@ BUFSIZE = 4
 BUFSIZE_RANGE = range(BUFSIZE)
 
 class Packet(object):
-	def __init__(self,l,i,k):
-		self.link = l
-		self.ident = i
-		self.kind = k
-		self.datum = 0
-		self.data = [0] * BUFSIZE
 
-	def append_to(self,lst):
+	def __init__(self,l:*Packet, i:int, k:int):
+		*Packet	self.link = l
+		int		self.ident = i
+		int		self.kind = k
+		int		self.datum = 0
+		#[]int	self.data = [0] * BUFSIZE
+		[]int	self.data = []int()
+		for x in range(BUFSIZE):
+			self.data.append( 0 )
+
+	def append_to(self, lst:*Packet) -> *Packet:
 		self.link = None
 		if lst is None:
 			return self
@@ -59,75 +63,76 @@ class TaskRec(object):
 
 class DeviceTaskRec(TaskRec):
 	def __init__(self):
-		self.pending = None
+		*Packet  self.pending = None
 
 class IdleTaskRec(TaskRec):
 	def __init__(self):
-		self.control = 1
-		self.count = 10000
+		int self.control = 1
+		int self.count = 10000
 
 class HandlerTaskRec(TaskRec):
 	def __init__(self):
-		self.work_in = None
-		self.device_in = None
+		*Packet  self.work_in = None
+		*Packet  self.device_in = None
 
-	def workInAdd(self,p):
+	def workInAdd(self, p:*Packet) ->*Packet:
 		self.work_in = p.append_to(self.work_in)
 		return self.work_in
 
-	def deviceInAdd(self,p):
+	def deviceInAdd(self, p:*Packet) ->*Packet:
 		self.device_in = p.append_to(self.device_in)
 		return self.device_in
 
 class WorkerTaskRec(TaskRec):
 	def __init__(self):
-		self.destination = I_HANDLERA
-		self.count = 0
+		int self.destination = I_HANDLERA
+		int self.count = 0
+
 # Task
 
 class TaskState(object):
 	def __init__(self):
-		self.packet_pending = True
-		self.task_waiting = False
-		self.task_holding = False
+		bool self.packet_pending = True
+		bool self.task_waiting = False
+		bool self.task_holding = False
 
-	def packetPending(self):
+	def packetPending(self) -> self:
 		self.packet_pending = True
 		self.task_waiting = False
 		self.task_holding = False
 		return self
 
-	def waiting(self):
+	def waiting(self) -> self:
 		self.packet_pending = False
 		self.task_waiting = True
 		self.task_holding = False
 		return self
 
-	def running(self):
+	def running(self) -> self:
 		self.packet_pending = False
 		self.task_waiting = False
 		self.task_holding = False
 		return self
 		
-	def waitingWithPacket(self):
+	def waitingWithPacket(self) -> self:
 		self.packet_pending = True
 		self.task_waiting = True
 		self.task_holding = False
 		return self
 		
-	def isPacketPending(self):
+	def isPacketPending(self) -> bool:
 		return self.packet_pending
 
-	def isTaskWaiting(self):
+	def isTaskWaiting(self) -> bool:
 		return self.task_waiting
 
-	def isTaskHolding(self):
+	def isTaskHolding(self) -> bool:
 		return self.task_holding
 
-	def isTaskHoldingOrWaiting(self):
+	def isTaskHoldingOrWaiting(self) -> bool:
 		return self.task_holding or (not self.packet_pending and self.task_waiting)
 
-	def isWaitingWithPacket(self):
+	def isWaitingWithPacket(self) -> bool:
 		return self.packet_pending and self.task_waiting and not self.task_holding
 
 
@@ -137,7 +142,7 @@ class TaskState(object):
 tracing = False
 layout = 0
 
-def trace(a):
+def trace(a:string):
 	global layout
 	layout -= 1
 	if layout <= 0:
@@ -146,42 +151,35 @@ def trace(a):
 	print(a)
 
 
-TASKTABSIZE = 10
 
-class TaskWorkArea(object):
-	def __init__(self):
-		self.taskTab = [None] * TASKTABSIZE
-
-		self.taskList = None
-
-		self.holdCount = 0
-		self.qpktCount = 0
-
-taskWorkArea = TaskWorkArea()
 
 class Task(TaskState):
 
+	# note: r:TaskRec is the super class, TODO cast to its subclass.
+	def __init__(self,i:int, p:int, w:*Packet, initialState:*TaskState,r:TaskRec):
+		*Task    self.link = taskWorkArea.task
+		int      self.ident = i
+		int      self.priority = p
+		*Packet  self.input = w
 
-	def __init__(self,i,p,w,initialState,r):
-		self.link = taskWorkArea.taskList
-		self.ident = i
-		self.priority = p
-		self.input = w
+		bool self.packet_pending = initialState.isPacketPending()
+		bool self.task_waiting = initialState.isTaskWaiting()
+		bool self.task_holding = initialState.isTaskHolding()
 
-		self.packet_pending = initialState.isPacketPending()
-		self.task_waiting = initialState.isTaskWaiting()
-		self.task_holding = initialState.isTaskHolding()
+		#*TaskRec  self.handle = r
+		self.handle = r  ## generic
 
-		self.handle = r
+		#taskWorkArea.taskList = self
+		#taskWorkArea.taskTab[i] = self
+		taskWorkArea.set_task(self, i)
 
-		taskWorkArea.taskList = self
-		taskWorkArea.taskTab[i] = self
-
-	def fn(self,pkt,r):
+	def fn(self, pkt:*Packet, r:TaskRec) -> self:
 		#raise NotImplementedError
 		print('NotImplementedError')
+		print(r)
+		return self
 
-	def addPacket(self,p,old):
+	def addPacket(self,p:*Packet, old:Task) -> self:
 		if self.input is None:
 			self.input = p
 			self.packet_pending = True
@@ -192,7 +190,8 @@ class Task(TaskState):
 		return old
 
 
-	def runTask(self):
+	def runTask(self) -> self:
+		*Packet msg
 		if self.isWaitingWithPacket():
 			msg = self.input
 			self.input = msg.link
@@ -200,57 +199,69 @@ class Task(TaskState):
 				self.running()
 			else:
 				self.packetPending()
-		else:
-			msg = None
+		#else:
+		#	msg = None
 
-		return self.fn(msg,self.handle)
+		#return self.fn(msg,self.handle)  ## self.handle is generic (interface{})
+		#return self.run_fn( msg, self.handle )
+		return self.fn(msg, go.type_assert(self.handle, TaskRec))  ## self.handle is generic (interface{})
+
+	#def run_fn(self, msg:*Packet, handle:TaskRec) -> self:
+	#	return self.fn(msg, handle)
 
 
-	def waitTask(self):
+	def waitTask(self) -> self:
 		self.task_waiting = True
 		return self
 
 
-	def hold(self):
+	def hold(self) -> *Task:
 		taskWorkArea.holdCount += 1
 		self.task_holding = True
 		return self.link
 
 
-	def release(self,i):
+	def release(self,i:int) -> self:
 		t = self.findtcb(i)
 		t.task_holding = False
 		if t.priority > self.priority:
-			return t
+			return go.type_assert(t, self)
 		else:
 			return self
 
 
-	def qpkt(self,pkt):
+	def qpkt(self, pkt:*Packet) -> self:
 		t = self.findtcb(pkt.ident)
 		taskWorkArea.qpktCount += 1
 		pkt.link = None
 		pkt.ident = self.ident
-		return t.addPacket(pkt,self)
+		#return t.addPacket(pkt,self)
+		#return t.addPacket(pkt, go.type_assert(self, self))
+		return go.type_assert( t.addPacket(pkt,self), self )
 
 
-	def findtcb(self,id):
+	def findtcb(self,id:int) -> *Task:
 		t = taskWorkArea.taskTab[id]
 		if t is None:
 			print('Exception in findtcb')
 		return t
 			
 
+
 # DeviceTask
 
 
 class DeviceTask(Task):
-	def __init__(self,i,p,w,s,r):
+	def __init__(self,i:int, p:int, w:*Packet, s:*TaskState, r:TaskRec):
 		Task.__init__(self,i,p,w,s,r)
 
-	def fn(self,pkt,r):
-		d = r
-		assert isinstance(d, DeviceTaskRec)
+	#######def fn(self,pkt:*Packet, r:TaskRec) -> self:
+	#def fn(self,pkt:*Packet, r:*DeviceTaskRec) -> self:
+	def fn(self,pkt:*Packet, r:*TaskRec) -> self:
+		d = go.type_assert(r, DeviceTaskRec)
+		#assert isinstance(d, DeviceTaskRec)
+		#class:DeviceTaskRec  d = r
+
 		if pkt is None:
 			pkt = d.pending
 			if pkt is None:
@@ -260,18 +271,20 @@ class DeviceTask(Task):
 				return self.qpkt(pkt)
 		else:
 			d.pending = pkt
-			if tracing: trace(pkt.datum)
-			return self.hold()
+			##########if tracing: trace(pkt.datum)
+			return go.type_assert(self.hold(), self)
 
 
 
 class HandlerTask(Task):
-	def __init__(self,i,p,w,s,r):
+	def __init__(self,i:int, p:int, w:*Packet, s:*TaskState, r:TaskRec):
 		Task.__init__(self,i,p,w,s,r)
 
-	def fn(self,pkt,r):
-		h = r
-		assert isinstance(h, HandlerTaskRec)
+	def fn(self, pkt:*Packet, r:*TaskRec) -> self:
+		h = go.type_assert(r, HandlerTaskRec)
+		#class:HandlerTaskRec h = r
+		#assert isinstance(h, HandlerTaskRec)  ## old style typedef
+
 		if pkt is not None:
 			if pkt.kind == K_WORK:
 				h.workInAdd(pkt)
@@ -298,15 +311,16 @@ class HandlerTask(Task):
 
 
 class IdleTask(Task):
-	def __init__(self,i,p,w,s,r):
+	def __init__(self,i:int, p:int, w:*Packet, s:*TaskState, r:TaskRec):
 		Task.__init__(self,i,0,None,s,r)
 
-	def fn(self,pkt,r):
-		i = r
-		assert isinstance(i, IdleTaskRec)
+	def fn(self,pkt:*Packet,r:*TaskRec) -> self:
+		i = go.type_assert(r, IdleTaskRec)
+		#assert isinstance(i, IdleTaskRec)
 		i.count -= 1
 		if i.count == 0:
-			return self.hold()
+			#return self.hold()
+			return go.type_assert(self.hold(), self)
 		elif i.control & 1 == 0:
 			i.control //= 2
 			return self.release(I_DEVA)
@@ -321,15 +335,17 @@ class IdleTask(Task):
 A = ord('A')
 
 class WorkTask(Task):
-	def __init__(self,i,p,w,s,r):
+	def __init__(self,i:int, p:int, w:*Packet, s:*TaskState, r:TaskRec):
 		Task.__init__(self,i,p,w,s,r)
 
-	def fn(self,pkt,r):
-		w = r
-		assert isinstance(w, WorkerTaskRec)
+	def fn(self,pkt:*Packet, r:*TaskRec) -> self:
+		w = go.type_assert(r, WorkerTaskRec)
+		#assert isinstance(w, WorkerTaskRec)
 		if pkt is None:
 			return self.waitTask()
 
+		#int dest
+		dest = 0
 		if w.destination == I_HANDLERA:
 			dest = I_HANDLERB
 		else:
@@ -348,28 +364,42 @@ class WorkTask(Task):
 		return self.qpkt(pkt)
 
 
-def schedule():
-	t = taskWorkArea.taskList
-	while t is not None:
-		pkt = None
+class TaskWorkArea(object):
+	def __init__(self):
+		[]Task      self.taskTab  = [10]Task()
+		*Task       self.task     = None
+		int self.holdCount = 0
+		int self.qpktCount = 0
 
-		if tracing:
-			print("tcb =",t.ident)
+	def set_task(self, t:Task, i:int):
+		c = go.type_assert(t, Task)
+		self.task = c
+		self.taskTab[i] = c
+
+taskWorkArea = TaskWorkArea()
+
+def schedule():
+	t = taskWorkArea.task
+	while t is not None:
+		#pkt = None
+		#if tracing:
+		#	print("tcb =",t.ident)
 
 		if t.isTaskHoldingOrWaiting():
 			t = t.link
 		else:
-			if tracing: trace(chr(ord("0")+t.ident))
+			###########if tracing: trace(chr(ord("0")+t.ident))
 			t = t.runTask()
 
 class Richards(object):
 
-	def run(self, iterations):
+	def run(self, iterations:int) ->bool:
 		for i in range(iterations):
 			taskWorkArea.holdCount = 0
 			taskWorkArea.qpktCount = 0
 
-			IdleTask(I_IDLE, 1, 10000, TaskState().running(), IdleTaskRec())
+			#IdleTask(I_IDLE, 1, 10000, TaskState().running(), IdleTaskRec())
+			IdleTask(I_IDLE, 1, None, TaskState().running(), IdleTaskRec())
 
 			wkq = Packet(None, 0, K_WORK)
 			wkq = Packet(wkq , 0, K_WORK)
@@ -398,19 +428,19 @@ class Richards(object):
 
 		return True
 
-def entry_point(iterations):
+def entry_point(iterations:int) ->float64:
 	r = Richards()
-	startTime = time()
+	startTime = clock()
 	result = r.run(iterations)
 	if not result:
 		print('#ERROR incorrect results!')
-	return time() - startTime
+	return clock() - startTime
 
 def main():
 	iterations=10
 	#print("#Richards benchmark (Python) starting. iterations="+str(iterations))
 	total_s = entry_point(iterations)
 	#print("#Total time for %s iterations: %s secs" %(iterations,total_s))
-	s = total_s / iterations
+	s = total_s / float64(iterations)
 	#print("#Average seconds per iteration:", s)
 	print(s)

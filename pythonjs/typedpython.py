@@ -1,4 +1,7 @@
-types = ['str', 'list', 'dict']
+# _*_ coding: utf-8 _*_
+
+
+types = ['string', 'str', 'list', 'dict', 'bool']
 
 glsl_types = ['struct*', 'int*', 'float*', 'vec2', 'vec3', 'vec4', 'mat2', 'mat3', 'mat4']
 glsl_xtypes = ['mat2x2', 'mat3x3', 'mat4x4']  ## others not supported in WebGLSL
@@ -25,19 +28,42 @@ GO_SPECIAL_CALLS = {
 	'go'         : '__go__',
 	'go.channel' : '__go_make_chan__',
 	'go.array'   : '__go__array__',
-	'go.make'    : '__go_make__'
+	'go.make'    : '__go_make__',
+	'go.addr'    : '__go__addr__',
+	'go.func'    : '__go__func__',
 }
+
+OPERATORS = {
+	'left' : {
+		u'⟦' : '__getitem__',
+		u'⟪' : '__getpeer__',
+		u'⟅' : '__getserver__',
+		u'⎨' : '__getclient__'
+	},
+	'right' : [u'⟧', u'⟫', u'⟆', u'⎬'],
+}
+
+
+
 
 def transform_source( source, strip=False ):
 	output = []
 	output_post = None
 
 	for line in source.splitlines():
+		if line.strip().startswith('#'):
+			continue
+
 		a = []
 		hit_go_typedef = False
+		hit_go_funcdef = False
 		gotype = None
+		isindef = False
 
 		for i,char in enumerate(line):
+			if isindef is False and len(a) and ''.join(a).strip().startswith('def '):
+				isindef = True
+
 			nextchar = None
 			j = i+1
 			while j < len(line):
@@ -45,30 +71,55 @@ def transform_source( source, strip=False ):
 				if nextchar.strip(): break
 				j += 1
 
-			if a and char==']' and j==i+1 and nextchar!=None and nextchar in '[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ':
+			if not isindef and len(a) and char in OPERATORS['left'] and j==i+1:
+				a.append( '<<__op_left__(u"%s")<<' %char)
+			elif not isindef and len(a) and char in OPERATORS['right']:
+				a.append('<<__op_right__(u"%s")' % char )
+			## go array and map syntax ##
+			elif not isindef and len(a) and char==']' and j==i+1 and nextchar!=None and nextchar in '[abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ':
 				assert '[' in a
+				hit_go_typedef = True
+
 				gotype = []
+				restore = list(a)
 				b = a.pop()
 				while b != '[':
 					gotype.append(b)
 					b = a.pop()
 				gotype.reverse()
-				gotype = ''.join(gotype)
+				gotype = ''.join(gotype).strip()  ## fixes spaces inside brackets `[ 1 ]string()`
 				if not gotype:
 					if nextchar=='[':
 						a.append('__go__array__<<')
 					else:
 						a.append('__go__array__(')
 				elif gotype.isdigit():
-					a.append('__go__arrayfixed__(%s,' %gotype)
-				else:
-					assert ''.join(a[-3:])=='map'
+					p = ''.join(a).split()[-1].strip()
+					if p.startswith('[') or p.startswith('='):
+						a.append('__go__arrayfixed__(%s,' %gotype)
+					else:
+						hit_go_typedef = False
+						restore.append(char)
+						a = restore
+
+				elif ''.join(a[-3:])=='map' and gotype != 'func':
 					a.pop(); a.pop(); a.pop()
 					a.append('__go__map__(%s,' %gotype)
-				hit_go_typedef = True
+				else:
+					hit_go_typedef = False
+					restore.append(char)
+					a = restore
+
+			elif hit_go_funcdef and char==')' and ')' in ''.join(a).split('func(')[-1]:
+				hit_go_funcdef = False
+				a.append('))<<')
 
 			elif hit_go_typedef and char=='(':
-				a.append(')<<(')
+				if ''.join(a).endswith('func'):
+					hit_go_funcdef = True
+					a.append( '(' )
+				else:
+					a.append(')<<(')
 				hit_go_typedef = False
 			elif hit_go_typedef and char=='{':
 				a.append(')<<{')
@@ -77,20 +128,48 @@ def transform_source( source, strip=False ):
 				#a.append(', type=True),')  ## this breaks function annotations that splits on ','
 				a.append('<<typedef),')
 				hit_go_typedef = False
+			elif hit_go_typedef and char in (' ', '\t'):
+				aa = []
+				for xx in a:
+					if xx == '__go__array__(':
+						aa.append('__go__array__[')
+					else:
+						aa.append( xx )
+				a = aa
+				a.append(']=\t\t\t\t')
+				hit_go_typedef = False
 
 
 			elif a and char in __whitespace:
 				b = ''.join(a)
 				b = b.strip()
-				if b in types and nextchar != '=':
+				is_class_type = b.startswith('class:') and len(b.split(':'))==2
+				is_pointer = b.startswith('*')
+				is_func = b.startswith('func(')
+				if (b in types or is_class_type or is_pointer or is_func) and nextchar != '=':
 					if strip:
 						a = a[ : -len(b) ]
+					elif is_class_type:
+						cls = b.split(':')[-1]
+						a = a[ : -len('class:')-len(cls)]
+						a.append('__go__class__[%s]=\t\t\t\t' %cls)
+
+					elif is_pointer:
+						cls = b.split('*')[-1]
+						a = a[ : -len('*')-len(cls)]
+						a.append('__go__pointer__[%s]=\t\t\t\t' %cls)
+					elif is_func:
+						u = ''.join(a)
+						u = u.replace('func(', '__go__func__["func(')
+						u += '"]=\t\t\t\t'
+						a = [w for w in u]
 					else:
 						if a[-1]=='*':
 							a.pop()
 							a.append('POINTER')
 						a.append('=\t\t\t\t')
 						#a.append( char )
+
 				else:
 					a.append( char )
 			else:
@@ -137,7 +216,7 @@ def transform_source( source, strip=False ):
 				output.append('%sexcept %s: %s=%s' %(indent, exception, s0.split('=')[0], default) )
 				c = ''
 
-		if '=\t\t\t\tdef ' in c:
+		if '=\t\t\t\tdef ' in c:  ## todo deprecate
 			x, c = c.split('=\t\t\t\tdef ')
 			indent = []
 			pre = []
@@ -153,7 +232,10 @@ def transform_source( source, strip=False ):
 		elif c.strip().startswith('def ') and '->' in c:  ## python3 syntax
 			c, rtype = c.split('->')
 			c += ':'
-			rtype = rtype.strip()[:-1]
+			rtype = rtype.strip()[:-1].strip()
+			if rtype.startswith('*'):
+				rtype = '"%s"' %rtype
+
 			indent = []
 			for char in c:
 				if char in __whitespace:
@@ -289,6 +371,15 @@ def transform_source( source, strip=False ):
 					else:
 						arg_name = arg
 
+					if typedef.startswith('*'):
+						typedef = '"%s"' %typedef.strip()
+					elif typedef.startswith('[]'):
+						typedef = '"*%s"' %typedef.strip()
+					elif typedef.startswith('map['):
+						typedef = '"*%s"' %typedef.strip()
+					elif typedef.startswith('func('):
+						typedef = '"%s"' %typedef.strip()
+
 					if chan:
 						output.append('%s@typedef_chan(%s=%s)' %(indent, arg_name, typedef))
 					else:
@@ -350,7 +441,7 @@ def transform_source( source, strip=False ):
 	return r
 
 
-test = '''
+test = u'''
 int a = 1
 float b = 1.1
 str c = "hi"
@@ -424,13 +515,9 @@ a = []string(x,y,z)
 
 ## in go becomes: [3]int{x,y,z}
 ## becomes: __go__arrayfixed__(3, string) << (x,y,z)
-a = [3]int(x,y,z)
+a = [ 3 ]int(x,y,z)
 
-## in go becomes: map[string]int{x,y,z}
-## becomes: __go__map__(string, int) << {'x':x, 'y':y, 'z':z}
-a = map[string]int{
-	"x":x, "y":y, "z":z
-}
+
 
 def f(a:int, b:int, c:int) ->int:
 	return a+b+c
@@ -447,6 +534,46 @@ y = go.make([]float64, 1000)
 
 def plot(id:string, latency:[]float64, xlabel:string, title:string ):
 	pass
+
+def f( x:*ABC ) -> *XXX:
+	pass
+
+class A:
+	def __init__(self):
+		int 		self.x = 1
+		[]int		self.y = []int()
+		class:ABS     self.z = A()
+		[]A     self.z = A()
+		bool    self.b = xxx()
+		*ABS     self.z = A()
+		#[]*A     self.z = A()   ## this is ugly
+
+def listpass( a:[]int ):
+	pass
+
+def mappass( a:map[string]int ):
+	return ConvertDataUnits[unit_type][unit][1][0]
+
+m = map[int]string{ a:'xxx' for a in range(10)}
+
+a = xxx[x][y]
+a = xxx⎨Z⎬
+a = xxx ⎨Z⎬⎨zzzz⎬
+
+functions = map[string]func(int)(int){}
+[]int a = go( f() for f in funtions )
+
+## in go becomes: map[string]int{x,y,z}
+## becomes: __go__map__(string, int) << {'x':x, 'y':y, 'z':z}
+a = map[string]int{
+	"x":x, 
+	"y":y, 
+	"z":z
+}
+
+def f():
+    return [[0]]
+print f()[0][0]
 
 '''
 

@@ -112,10 +112,21 @@ class Typedef(object):
 				if res:
 					return res
 
-class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
+class NodeVisitorBase( ast.NodeVisitor ):
+	def __init__(self):
+		self._line = None
+		self._line_number = 0
+		self._stack = []        ## current path to the root
 
-	identifier = 0
-	_func_typedefs = ()
+	def visit(self, node):
+		"""Visit a node."""
+		## modified code of visit() method from Python 2.7 stdlib
+		self._stack.append(node)
+		method = 'visit_' + node.__class__.__name__
+		visitor = getattr(self, method, self.generic_visit)
+		res = visitor(node)
+		self._stack.pop()
+		return res
 
 	def format_error(self, node):
 		lines = []
@@ -132,13 +143,26 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 			msg += '%s%s line:%s col:%s\n' % (' '*(l+1)*2, n.__class__.__name__, n.lineno, n.col_offset)
                 return msg
 
-	def __init__(self, source=None, module=None, module_path=None, dart=False, coffee=False, lua=False, go=False):
-		super(PythonToPythonJS, self).__init__()
+
+class PythonToPythonJS(NodeVisitorBase, inline_function.Inliner):
+
+	identifier = 0
+	_func_typedefs = ()
+
+
+
+	def __init__(self, source=None, modules=False, module_path=None, dart=False, coffee=False, lua=False, go=False, fast_javascript=False, pure_javascript=False):
+		#super(PythonToPythonJS, self).__init__()
+		NodeVisitorBase.__init__(self)
+		self._modules = modules          ## split into mutiple files by class
 		self._module_path = module_path  ## used for user `from xxx import *` to load .py files in the same directory.
 		self._with_lua = lua
 		self._with_coffee = coffee
 		self._with_dart = dart
 		self._with_go = go
+		self._with_gojs = False
+		self._fast_js = fast_javascript
+		self._strict_mode = pure_javascript
 
 		self._html_tail = []; script = False
 		if source.strip().startswith('<html'):
@@ -195,11 +219,14 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 
 		self._in_catch_exception = False
 
-		self._line = None
-		self._line_number = 0
-		self._stack = []        ## current path to the root
 
-		self._direct_operators = set()  ## optimize "+" and "*" operator
+
+		## optimize "+" and "*" operator
+		if fast_javascript:
+			self._direct_operators = set( ['+', '*'] )
+		else:
+			self._direct_operators = set()
+
 		self._with_ll = False   ## lowlevel
 		self._with_js = True
 		self._in_lambda = False
@@ -211,13 +238,14 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 		self._with_webworker = False
 		self._with_rpc = None
 		self._with_rpc_name = None
-		self._with_direct_keys = False
+		self._with_direct_keys = fast_javascript
 
 		self._with_glsl = False
 		self._in_gpu_main = False
 		self._gpu_return_types = set() ## 'array' or float32, or array of 'vec4' float32's.
 
 		self._source = source.splitlines()
+		self._class_stack = list()
 		self._classes = dict()    ## class name : [method names]
 		self._class_parents = dict()  ## class name : parents
 		self._instance_attributes = dict()  ## class name : [attribute names]
@@ -235,7 +263,6 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 		self._return_type = None
 
 
-		self._module = module    ## DEPRECATED
 		self._typedefs = dict()  ## class name : typedef  (deprecated - part of the old static type finder)
 
 		self._globals = dict()
@@ -320,15 +347,7 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 			for line in self._html_tail:
 				writer.write(line)
 
-        def visit(self, node):
-		"""Visit a node."""
-		## modified code of visit() method from Python 2.7 stdlib
-		self._stack.append(node)
-		method = 'visit_' + node.__class__.__name__
-		visitor = getattr(self, method, self.generic_visit)
-		res = visitor(node)
-		self._stack.pop()
-		return res
+
 
 	def has_webworkers(self):
 		return len(self._webworker_functions.keys())
@@ -464,10 +483,15 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 			lib = ministdlib.DART
 		elif self._with_lua:
 			lib = ministdlib.LUA
+		elif self._with_go:
+			lib = ministdlib.GO
 		else:
 			lib = ministdlib.JS
 
-		path = os.path.join( self._module_path, node.module+'.py')
+		if self._module_path:
+			path = os.path.join( self._module_path, node.module+'.py')
+		else:
+			path = os.path.join( './', node.module+'.py')
 
 		if node.module == 'time' and node.names[0].name == 'sleep':
 			self._use_sleep = True
@@ -500,12 +524,15 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 			data = open(path, 'rb').read()
 			subtrans = PythonToPythonJS(
 				data, 
-				module_path=self._module_path
+				module_path     = self._module_path,
+				fast_javascript = self._fast_js,
+				modules         = self._modules,
+				pure_javascript = self._strict_mode,
 			)
 			self._js_classes.update( subtrans._js_classes ) ## TODO - what other typedef info needs to be copied here?
 
 		else:
-			msg = 'invalid import - file not found: %s/%s.py'%(self._module_path,node.module)
+			msg = 'invalid import - file not found: %s'%path
 			raise SyntaxError( self.format_error(msg) )
 
 	def visit_Assert(self, node):
@@ -524,7 +551,7 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 			if isinstance(v, ast.Lambda):
 				v.keep_as_lambda = True
 			v = self.visit( v )
-			if self._with_dart or self._with_ll or self._with_go:
+			if self._with_dart or self._with_ll or self._with_go or self._fast_js:
 				a.append( '%s:%s'%(k,v) )
 				#if isinstance(node.keys[i], ast.Str):
 				#	a.append( '%s:%s'%(k,v) )
@@ -535,7 +562,8 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 			else:
 				a.append( 'JSObject(key=%s, value=%s)'%(k,v) )  ## this allows non-string keys
 
-		if self._with_dart or self._with_ll or self._with_go:
+
+		if self._with_dart or self._with_ll or self._with_go or self._fast_js:
 			b = ','.join( a )
 			return '{%s}' %b
 		elif self._with_js:
@@ -584,16 +612,24 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 		return self.visit_ListComp(node)
 
 	_comp_id = 0
-	def visit_ListComp(self, node):
-		node.returns_type = 'list'
+
+	def visit_DictComp(self, node):
+		'''
+		node.key is key name
+		node.value is value
+		'''
+		#raise SyntaxError(self.visit(node.key))  ## key, value, generators
+
+		node.returns_type = 'dict'
 
 		if len(self._comprehensions) == 0:
-			comps = collect_comprehensions( node )
+			comps = collect_dict_comprehensions( node )
 			for i,cnode in enumerate(comps):
 				cname = '__comp__%s' % self._comp_id
-				self._comp_id += 1
 				cnode._comp_name = cname
 				self._comprehensions.append( cnode )
+				self._comp_id += 1
+
 
 		cname = node._comp_name
 		writer.write('var(%s)'%cname)
@@ -607,7 +643,47 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 		writer.write('var( %s )' %','.join(a) )
 
 		if self._with_go:
+			assert node.go_dictcomp_type
+			k,v = node.go_dictcomp_type
+			writer.write('%s = __go__map__(%s, %s)<<{}' %(cname, k,v))
+		else:
+			writer.write('%s = {}'%cname)
+
+		generators = list( node.generators )
+		generators.reverse()
+		self._gen_comp( generators, node )
+
+		self._comprehensions.remove( node )
+		return cname
+
+
+	def visit_ListComp(self, node):
+		node.returns_type = 'list'
+
+		if len(self._comprehensions) == 0 or True:
+			comps = collect_comprehensions( node )
+			assert comps
+			for i,cnode in enumerate(comps):
+				cname = '__comp__%s' % self._comp_id
+				cnode._comp_name = cname
+				self._comprehensions.append( cnode )
+				self._comp_id += 1
+
+		cname = node._comp_name
+		writer.write('var(%s)'%cname)
+		#writer.write('var(__comp__%s)'%self._comp_id)
+
+		length = len( node.generators ) + (len(self._comprehensions)-1)
+		a = ['idx%s'%i for i in range(length)]
+		writer.write('var( %s )' %','.join(a) )
+		a = ['iter%s'%i for i in range(length)]
+		writer.write('var( %s )' %','.join(a) )
+		a = ['get%s'%i for i in range(length)]
+		writer.write('var( %s )' %','.join(a) )
+
+		if self._with_go:
 			assert node.go_listcomp_type
+			#writer.write('__comp__%s = __go__array__(%s)' %(self._comp_id, node.go_listcomp_type))
 			writer.write('%s = __go__array__(%s)' %(cname, node.go_listcomp_type))
 		else:
 			writer.write('%s = JSArray()'%cname)
@@ -616,14 +692,22 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 		generators.reverse()
 		self._gen_comp( generators, node )
 
-		self._comprehensions.remove( node )
-		#return '__get__(list, "__call__")([], {pointer:%s})' %cname
-		return cname
+		#if node in self._comprehensions:
+		#	self._comprehensions.remove( node )
+
+		if self._with_go:
+			#return '__go__addr__(__comp__%s)' %self._comp_id
+			return '__go__addr__(%s)' %cname
+		else:
+			#return '__comp__%s' %self._comp_id
+			return cname
 
 
 	def _gen_comp(self, generators, node):
+		#self._comp_id += 1
+		#id = self._comp_id
+
 		gen = generators.pop()
-		#if len(gen.ifs): raise NotImplementedError  ## TODO
 		id = len(generators) + self._comprehensions.index( node )
 		assert isinstance(gen.target, Name)
 		writer.write('idx%s = 0'%id)
@@ -632,13 +716,19 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 		if isinstance(gen.iter, ast.Call) and isinstance(gen.iter.func, ast.Name) and gen.iter.func.id in ('range', 'xrange'):
 			is_range = True
 
-			#writer.write('iter%s = __get__(len, "__call__")([%s], JSObject())' %(id, self.visit(gen.iter.args[0])) )
 			writer.write('iter%s = %s' %(id, self.visit(gen.iter.args[0])) )
 			writer.write('while idx%s < iter%s:' %(id,id) )
 			writer.push()
 
 			writer.write('var(%s)'%gen.target.id)
 			writer.write('%s=idx%s' %(gen.target.id, id) )
+
+		elif self._with_js:  ## only works with arrays in javascript mode
+			writer.write('iter%s = %s' %(id, self.visit(gen.iter)) )
+			writer.write('while idx%s < iter%s.length:' %(id,id) )
+			writer.push()
+			writer.write('var(%s)'%gen.target.id)
+			writer.write('%s=iter%s[idx%s]' %(gen.target.id, id,id) )
 
 		else:
 			writer.write('iter%s = %s' %(id, self.visit(gen.iter)) )
@@ -655,33 +745,21 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 			self._gen_comp( generators, node )
 		else:
 			cname = node._comp_name #self._comprehensions[-1]
+			#cname = '__comp__%s' % self._comp_id
+
 			if len(gen.ifs):
 				test = []
 				for compare in gen.ifs:
 					test.append( self.visit(compare) )
 
 				writer.write('if %s:' %' and '.join(test))
-
 				writer.push()
-				if self._with_dart:
-					writer.write('%s.add( %s )' %(cname,self.visit(node.elt)) )
-				elif self._with_lua:
-					writer.write('table.insert(%s, %s )' %(cname,self.visit(node.elt)) )
-				elif self._with_go:
-					writer.write('%s = append(%s, %s )' %(cname, cname,self.visit(node.elt)) )
-				else:
-					writer.write('%s.push( %s )' %(cname,self.visit(node.elt)) )
+				self._gen_comp_helper(cname, node)
 				writer.pull()
-			else:
 
-				if self._with_dart:
-					writer.write('%s.add( %s )' %(cname,self.visit(node.elt)) )
-				elif self._with_lua:
-					writer.write('table.insert(%s, %s )' %(cname,self.visit(node.elt)) )
-				elif self._with_go:
-					writer.write('%s = append(%s, %s )' %(cname, cname,self.visit(node.elt)) )
-				else:
-					writer.write('%s.push( %s )' %(cname,self.visit(node.elt)) )
+			else:
+				self._gen_comp_helper(cname, node)
+
 		if self._with_lua:
 			writer.write('idx%s = idx%s + 1' %(id,id) )
 		else:
@@ -691,7 +769,24 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 		if self._with_lua:  ## convert to list
 			writer.write('%s = list.__call__({},{pointer:%s, length:idx%s})' %(cname, cname, id))
 
+	def _gen_comp_helper(self, cname, node):
+		if isinstance(node, ast.DictComp):
+			key = self.visit(node.key)
+			val = self.visit(node.value)
+			if self._with_go:
+				writer.write('%s[ %s ] = %s' %(cname, key, val) )
+			else:
+				writer.write('%s[ %s ] = %s' %(cname, key, val) )
 
+		else:
+			if self._with_dart:
+				writer.write('%s.add( %s )' %(cname,self.visit(node.elt)) )
+			elif self._with_lua:
+				writer.write('table.insert(%s, %s )' %(cname,self.visit(node.elt)) )
+			elif self._with_go:
+				writer.write('%s = append(%s, %s )' %(cname, cname,self.visit(node.elt)) )
+			else:
+				writer.write('%s.push( %s )' %(cname,self.visit(node.elt)) )
 
 	def visit_In(self, node):
 		return ' in '
@@ -762,7 +857,10 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 				attr = node.target.attr
 				target = '%s.%s' %(name, attr)
 
-			if self._with_dart:
+			if self._with_go:
+				a = '%s /= %s' %(target, self.visit(node.value))
+
+			elif self._with_dart:
 				a = '%s = (%s/%s).floor()' %(target, target, self.visit(node.value))
 			else:
 				a = '%s = Math.floor(%s/%s)' %(target, target, self.visit(node.value))
@@ -855,8 +953,9 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 
 	def _visit_dart_classdef(self, node):
 		name = node.name
-		log('Dart-ClassDef: %s'%name)
+		node._struct_vars = dict()
 		self._js_classes[ name ] = node
+		self._class_stack.append( node )
 
 		methods = {}
 		method_list = []  ## getter/setters can have the same name
@@ -917,6 +1016,12 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 			if not self._with_go:
 				init.name = node.name
 			self.visit(init)
+			for item in init.body:
+				if isinstance(item, ast.Assign) and isinstance(item.targets[0], ast.Attribute):
+					if isinstance(item.targets[0].value, ast.Name) and item.targets[0].value.id=='self':
+						attr = item.targets[0].attr
+						if attr not in node._struct_vars:
+							node._struct_vars[ attr ] = 'interface'
 
 		## methods
 		for method in method_list:
@@ -931,7 +1036,16 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 		if not init and not method_list:
 			writer.write( 'pass' )
 
+
+		if node._struct_vars:
+			writer.write('{')
+			for k in node._struct_vars:
+				v = node._struct_vars[k]
+				writer.write('  %s : %s,' %(k,v))
+			writer.write('}')
+
 		writer.pull()
+		self._class_stack.pop()
 
 	def is_gpu_method(self, n):
 		for dec in n.decorator_list:
@@ -1008,10 +1122,12 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 			if hasattr(init, '_code'):  ## cached ##
 				code = init._code
 			elif args:
-				code = '%s.__init__(this, %s); %s'%(name, ','.join(args), tail)
+				#code = '%s.__init__(this, %s); %s'%(name, ','.join(args), tail)
+				code = 'this.__init__(%s); %s'%(', '.join(args), tail)
 				init._code = code
 			else:
-				code = '%s.__init__(this);     %s'%(name, tail)
+				#code = '%s.__init__(this);     %s'%(name, tail)
+				code = 'this.__init__();     %s' % tail
 				init._code = code
 
 			writer.write(code)
@@ -1019,17 +1135,22 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 		else:
 			writer.write('pass')
 
-		## `self.__class__` pointer ##
-		writer.write('this.__class__ = %s' %name)
 
-		## instance UID ##
-		writer.write('this.__uid__ = "￼" + _PythonJS_UID')
-		writer.write('_PythonJS_UID += 1')
+
+		if not self._fast_js:
+			## `self.__class__` pointer ##
+			writer.write('this.__class__ = %s' %name)  ## isinstance runtime builtin requires this
+
+			## instance UID ##
+			writer.write('this.__uid__ = "￼" + _PythonJS_UID')
+			writer.write('_PythonJS_UID += 1')
 
 		writer.pull()
-		## class UID ##
-		writer.write('%s.__uid__ = "￼" + _PythonJS_UID' %name)
-		writer.write('_PythonJS_UID += 1')
+
+		if not self._fast_js:
+			## class UID ##
+			writer.write('%s.__uid__ = "￼" + _PythonJS_UID' %name)
+			writer.write('_PythonJS_UID += 1')
 
 		#keys = methods.keys()
 		#keys.sort()
@@ -1054,8 +1175,12 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 				line = self.visit(method)
 				if line: writer.write( line )
 				#writer.write('%s.prototype.%s = %s'%(name,mname,mname))
-				f = 'function () { return %s.prototype.%s.apply(arguments[0], Array.prototype.slice.call(arguments,1)) }' %(name, mname)
-				writer.write('%s.%s = JS("%s")'%(name,mname,f))
+
+				if not self._fast_js:
+					## allows subclass method to extend the parent's method by calling the parent by class name,
+					## `MyParentClass.some_method(self)`
+					f = 'function () { return %s.prototype.%s.apply(arguments[0], Array.prototype.slice.call(arguments,1)) }' %(name, mname)
+					writer.write('%s.%s = JS("%s")'%(name,mname,f))
 
 		for base in node.bases:
 			base = self.visit(base)
@@ -1082,13 +1207,17 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 			writer.write('%s.prototype.__struct_name__ = "%s"' %(name,name))
 
 		## TODO support property decorators in javascript-mode ##
-		writer.write('%s.prototype.__properties__ = {}' %name)
-		writer.write('%s.prototype.__unbound_methods__ = {}' %name)
+		#writer.write('%s.prototype.__properties__ = {}' %name)
+		#writer.write('%s.prototype.__unbound_methods__ = {}' %name)
 
 
 		self._in_js_class = False
 
 	def visit_ClassDef(self, node):
+		#raise SyntaxError( self._modules )
+		if self._modules:
+			writer.write('__new_module__(%s)' %node.name) ## triggers a new file in final stage of translation.
+
 		if self._with_dart or self._with_go:
 			self._visit_dart_classdef(node)
 			return
@@ -1235,7 +1364,7 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 		elif isinstance(node.test, ast.List):
 			writer.write('if %s.length:' % self.visit(node.test))
 
-		elif self._with_ll or self._with_glsl:
+		elif self._with_ll or self._with_glsl or self._fast_js:
 			writer.write('if %s:' % self.visit(node.test))
 		elif isinstance(node.test, ast.Compare):
 			writer.write('if %s:' % self.visit(node.test))
@@ -1305,7 +1434,9 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 			elif node.id == 'False':
 				return 'false'
 			elif node.id == 'None':
-				if self._with_dart:
+				if self._with_go:
+					return 'nil'
+				elif self._with_dart:
 					return 'null'
 				else:
 					return 'null'
@@ -1379,10 +1510,16 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 		is_go_listcomp = False
 		if self._with_go:
 			if op == '<<':
-				if isinstance(node.left, ast.Call) and isinstance(node.left.func, ast.Name) and node.left.func.id=='__go__array__':
-					if isinstance(node.right, ast.GeneratorExp):
+				if isinstance(node.left, ast.Call) and isinstance(node.left.func, ast.Name):
+					if node.left.func.id=='__go__array__' and isinstance(node.right, ast.GeneratorExp):
 						is_go_listcomp = True
 						node.right.go_listcomp_type = node.left.args[0].id
+					elif node.left.func.id=='__go__map__':
+						if isinstance(node.left.args[1], ast.Call):  ## map comprehension
+							is_go_listcomp = True
+							node.right.go_dictcomp_type =  ( node.left.args[0].id, self.visit(node.left.args[1]) )
+						else:
+							node.right.go_dictcomp_type =  ( node.left.args[0].id, node.left.args[1].id )
 
 
 		right = self.visit(node.right)
@@ -1390,6 +1527,7 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 		if self._with_glsl:
 			return '(%s %s %s)' % (left, op, right)
 		elif self._with_go:
+			if op == '//': op = '/'
 			if is_go_listcomp:
 				return right
 			else:
@@ -1823,11 +1961,62 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 					return None
 				else:
 					targets = targets[1:]
+
+			elif len(targets)==2 and isinstance(targets[1], ast.Attribute) and isinstance(targets[1].value, ast.Name) and targets[1].value.id == 'self' and len(self._class_stack):
+				self._class_stack[-1]._struct_vars[ targets[1].attr ] = target.id
+				if target.id == 'long' and isinstance(node.value, ast.Num):
+					## requires long library ##
+					writer.write('%s = long.fromString("%s")' %(targets[1].value.id, self.visit(node.value)))
+					return None
+				else:
+					targets = targets[1:]
+
 			elif len(targets)==1 and isinstance(node.value, ast.Name) and target.id in typedpython.types:
 				self._typedef_vars[ node.value.id ] = target.id
 				return None
+			elif isinstance(target, ast.Name) and target.id in typedpython.types:
+				raise SyntaxError( self.format_error(target.id) )
 			else:
+				#xxx = self.visit(target) + ':' + self.visit(targets[1])
+				xxx = self.visit(target) + ':' + self.visit(node.value)
 				raise SyntaxError( self.format_error(targets) )
+				raise SyntaxError( self.format_error(xxx) )
+
+		elif self._with_go and isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and target.value.id in ('__go__array__', '__go__class__', '__go__pointer__', '__go__func__'):
+			if len(targets)==2 and isinstance(targets[1], ast.Attribute) and isinstance(targets[1].value, ast.Name) and targets[1].value.id == 'self' and len(self._class_stack):
+				if target.value.id == '__go__array__':
+					self._class_stack[-1]._struct_vars[ targets[1].attr ] = '__go__array__(%s<<typedef)' %self.visit(target.slice)
+				elif target.value.id == '__go__class__':
+					self._class_stack[-1]._struct_vars[ targets[1].attr ] = self.visit(target.slice)
+				elif target.value.id == '__go__pointer__':
+					self._class_stack[-1]._struct_vars[ targets[1].attr ] = '"*%s"' %self.visit(target.slice)
+				elif target.value.id == '__go__func__':
+					self._class_stack[-1]._struct_vars[ targets[1].attr ] = self.visit(target.slice)
+
+
+			elif target.value.id == '__go__class__':
+				#self._class_stack[-1]._struct_vars[ targets[1].attr ] = self.visit(target.slice)
+				raise SyntaxError(self.visit(target))
+			elif target.value.id == '__go__pointer__':
+				if len(targets)==2:
+					writer.write(
+						'inline("var %s *%s;")' %(self.visit(targets[1]), self.visit(target.slice))
+					)
+				else:
+					writer.write(
+						'inline("var %s *%s;")' %(self.visit(node.value), self.visit(target.slice))
+					)
+
+			elif target.value.id == '__go__array__':
+				if isinstance(node.value, ast.Call) and len(node.value.args) and isinstance(node.value.args[0], ast.GeneratorExp ):
+					node.value.args[0].go_listcomp_type = self.visit(target.slice)
+				else:
+					raise SyntaxError( 'only a variable created by a generator expressions needs an array typedef')
+			else:
+				raise SyntaxError(self.visit(target))
+
+			targets = targets[1:]
+
 
 		elif self._with_rpc_name and isinstance(target, Attribute) and isinstance(target.value, Name) and target.value.id == self._with_rpc_name:
 			writer.write('__rpc_set__(%s, "%s", %s)' %(self._with_rpc, target.attr, self.visit(node.value)))
@@ -1962,6 +2151,7 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 
 			if self._with_js or self._with_dart or self._with_go:
 				writer.write( '%s.%s=%s' %(target_value, target.attr, self.visit(node.value)) )
+
 			elif typedef and target.attr in typedef.properties and 'set' in typedef.properties[ target.attr ]:
 				setter = typedef.properties[ target.attr ]['set']
 				writer.write( '%s( [%s, %s], JSObject() )' %(setter, target_value, self.visit(node.value)) )
@@ -2111,11 +2301,17 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 			writer.write('%s = %s' % (','.join(elts), self.visit(node.value)))
 
 		else:  # it's a Tuple
-			id = self.identifier
-			self.identifier += 1
-			r = '__r_%s' % id
-			writer.write('var(%s)' % r)
-			writer.write('%s = %s' % (r, self.visit(node.value)))
+
+			if isinstance(node.value, ast.Name):
+				r = node.value.id
+			else:
+				id = self.identifier
+				self.identifier += 1
+				r = '__r_%s' % id
+				writer.write('var(%s)' % r)
+				writer.write('%s = %s' % (r, self.visit(node.value)))
+
+
 			for i, target in enumerate(target.elts):
 				if isinstance(target, Attribute):
 					code = '__set__(%s, "%s", %s[%s])' % (
@@ -2367,10 +2563,10 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 			if node.starargs:
 				args.append('*%s' %self.visit(node.starargs))
 
-			if isinstance(node.func, Name) and node.func.id in self._js_classes:
-				return '__new__%s(%s)' %( self.visit(node.func), ','.join(args) )
-			else:
-				return '%s(%s)' %( self.visit(node.func), ','.join(args) )
+			#if isinstance(node.func, Name) and node.func.id in self._js_classes:  ## TODO moving to pythonjs_to_go
+			#	return '__new__%s(%s)' %( self.visit(node.func), ','.join(args) )
+			#else:
+			return '%s(%s)' %( self.visit(node.func), ','.join(args) )
 
 		elif self._with_js or self._with_dart:
 			args = list( map(self.visit, node.args) )
@@ -2414,27 +2610,47 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 					return '__jsdict_set(%s, %s)' %(self.visit(anode.value), ','.join(args))
 
 				elif anode.attr == 'keys' and not args:
+					if self._strict_mode:
+						raise SyntaxError( self.format_error('method `keys` is not allowed without arguments') )
+
 					return '__jsdict_keys(%s)' %self.visit(anode.value)
 
 				elif anode.attr == 'values' and not args:
+					if self._strict_mode:
+						raise SyntaxError( self.format_error('method `values` is not allowed without arguments') )
 					return '__jsdict_values(%s)' %self.visit(anode.value)
 
 				elif anode.attr == 'items' and not args:
+					if self._strict_mode:
+						raise SyntaxError( self.format_error('method `items` is not allowed without arguments') )
+
 					return '__jsdict_items(%s)' %self.visit(anode.value)
 
 				elif anode.attr == 'pop':
 					if args:
 						return '__jsdict_pop(%s, %s)' %(self.visit(anode.value), ','.join(args) )
 					else:
-						return '__jsdict_pop(%s)' %self.visit(anode.value)
+						if self._strict_mode:
+							return '%s.pop()' %self.visit(anode.value)
+						else:
+							return '__jsdict_pop(%s)' %self.visit(anode.value)
 
 				elif anode.attr == 'split' and not args:
+					if self._strict_mode:
+						raise SyntaxError( self.format_error('method `split` is not allowed without arguments') )
+
 					return '__split_method(%s)' %self.visit(anode.value)
 
 				elif anode.attr == 'sort' and not args:
+					if self._strict_mode:
+						raise SyntaxError( self.format_error('method `sort` is not allowed without arguments') )
+
 					return '__sort_method(%s)' %self.visit(anode.value)
 
 				elif anode.attr == 'replace' and len(node.args)==2:
+					if self._strict_mode:
+						raise SyntaxError( self.format_error('method `replace` is not allowed...') )
+
 					return '__replace_method(%s, %s)' %(self.visit(anode.value), ','.join(args) )
 
 				else:
@@ -2726,7 +2942,7 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 
 		##'__INLINE_FUNCTION__' from typedpython.py
 
-		if hasattr(node, 'keep_as_lambda') or args and args[0]=='__INLINE_FUNCTION__':
+		if hasattr(node, 'keep_as_lambda') or (args and args[0]=='__INLINE_FUNCTION__'):
 			## TODO lambda keyword args
 			self._in_lambda = True
 			a = '(lambda %s: %s)' %(','.join(args), self.visit(node.body))
@@ -2744,7 +2960,6 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 		global writer
 
 		if node in self._generator_function_nodes:
-			log('generator function: %s'%node.name)
 			self._generator_functions.add( node.name )
 			if '--native-yield' in sys.argv:
 				raise NotImplementedError  ## TODO
@@ -2790,7 +3005,7 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 			if isinstance(decorator, Name) and decorator.id == 'gpu':
 				gpu = True
 
-			elif isinstance(decorator, Call) and decorator.func.id == 'expression':
+			elif isinstance(decorator, Call) and decorator.func.id == 'expression':  ## js function expressions are now the default
 				assert len(decorator.args)==1
 				func_expr = self.visit(decorator.args[0])
 
@@ -2831,8 +3046,14 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 
 				else:
 					assert len(decorator.args) == 1
-					assert isinstance( decorator.args[0], Name)
-					return_type = decorator.args[0].id
+					if isinstance( decorator.args[0], Name):
+						return_type = decorator.args[0].id
+					elif isinstance(decorator.args[0], ast.Str):
+						return_type = '"%s"' %decorator.args[0].s
+					else:
+						raise SyntaxError('invalid @returns argument')
+
+
 					if return_type in typedpython.glsl_types:
 						self._gpu_return_types.add( return_type )
 
@@ -3093,21 +3314,44 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 
 		elif self._with_js or javascript or self._with_ll:
 			if node.args.defaults:
-				kwargs_name = node.args.kwarg or '_kwargs_'
-				lines = [ 'if (!( %s instanceof Object )) {' %kwargs_name ]
-				a = ','.join( ['%s: arguments[%s]' %(arg.id, i) for i,arg in enumerate(node.args.args)] )
-				lines.append( 'var %s = {%s}' %(kwargs_name, a))
-				lines.append( '}')
-				for a in lines:
-					writer.write("JS('''%s''')" %a)
+				if not self._fast_js:
+					## this trys to recover when called in a bad way,
+					## however, this could be dangerous because the program
+					## should fail if a function is called this badly.
+					kwargs_name = node.args.kwarg or '_kwargs_'
+					lines = [ 'if (!( %s instanceof Object )) {' %kwargs_name ]
+					a = ','.join( ['%s: arguments[%s]' %(arg.id, i) for i,arg in enumerate(node.args.args)] )
+					lines.append( 'var %s = {%s}' %(kwargs_name, a))
+					lines.append( '}')
+					for a in lines:
+						writer.write("JS('''%s''')" %a)
 
 				offset = len(node.args.args) - len(node.args.defaults)
+
+				maxlen = 0
+				maxlen2 = 0
+				for i, arg in enumerate(node.args.args):
+					dindex = i - offset
+					if dindex >= 0:
+						dval = self.visit( node.args.defaults[dindex] )
+
+						if len(arg.id) > maxlen:
+							maxlen = len(arg.id)
+
+						if len(dval) > maxlen2:
+							maxlen2 = len(dval)
+
+
 				for i, arg in enumerate(node.args.args):
 					dindex = i - offset
 					if dindex >= 0:
 						default_value = self.visit( node.args.defaults[dindex] )
-						a = (kwargs_name, kwargs_name, arg.id, arg.id, default_value, arg.id, kwargs_name, arg.id)
-						b = "if (%s === undefined || %s.%s === undefined) {var %s = %s} else {var %s=%s.%s}" %a
+						#a = (kwargs_name, kwargs_name, arg.id, arg.id, default_value, arg.id, kwargs_name, arg.id)
+						#b = "if (%s === undefined || %s.%s === undefined) {var %s = %s} else {var %s=%s.%s}" %a
+						spaces = ' ' * (maxlen - len(arg.id))
+						spaces2 = ' ' * (maxlen2 - len(default_value))
+						a = (arg.id, spaces, kwargs_name, kwargs_name,arg.id, spaces, default_value, spaces2, kwargs_name, arg.id)
+						b = "var %s %s= (%s === undefined || %s.%s === undefined)%s?\t%s %s: %s.%s" %a
 						c = "JS('''%s''')" %b
 						writer.write( c )
 
@@ -3485,8 +3729,6 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 			for n in node.body:
 				calls = collect_calls(n)
 				for c in calls:
-					log('--call: %s' %c)
-					log('------: %s' %c.func)
 					if isinstance(c.func, ast.Name):  ## these are constant for sure
 						i = self._call_ids
 						writer.write( '''JS('var __call__%s = __get__(%s,"__call__")')''' %(i,self.visit(c.func)) )
@@ -3860,10 +4102,22 @@ class PythonToPythonJS(NodeVisitor, inline_function.Inliner):
 				if a: writer.write(a)
 			writer.pull()
 
+		elif isinstance( node.context_expr, ast.Name ) and node.context_expr.id == 'gojs':
+			raise SyntaxError('deprecated')
+			transform_gopherjs( node )
+
+			self._with_gojs = True
+			for b in node.body:
+				a = self.visit(b)
+				if a: writer.write(a)
+			self._with_gojs = False
+
 		else:
 			raise SyntaxError('invalid use of "with" statement')
 
-EXTRA_WITH_TYPES = ('__switch__', '__default__', '__case__', '__select__')
+EXTRA_WITH_TYPES = ('__switch__', '__default__', '__case__', '__select__', 'gojs')
+
+
 
 class GeneratorFunctionTransformer( PythonToPythonJS ):
 	'''
@@ -3889,16 +4143,164 @@ class GeneratorFunctionTransformer( PythonToPythonJS ):
 
 	def visit_Yield(self, node):
 		if self._in_head:
-			writer.write('this.__head_yield = %s'%self.visit(node.value))
-			writer.write('this.__head_returned = 0')
+			if self._with_go:
+				writer.write('self.__head_yield = %s'%self.visit(node.value))
+				writer.write('self.__head_returned = 0')
+			else:
+				writer.write('this.__head_yield = %s'%self.visit(node.value))
+				writer.write('this.__head_returned = 0')
 			self._head_yield = True
 		else:
 			writer.write('__yield_return__ = %s'%self.visit(node.value))
 
 	def visit_Name(self, node):
-		return 'this.%s' %node.id
+		## this hack should be replaced to support globals
+		if self._with_go:
+			return 'self.%s' %node.id
+		else:
+			return 'this.%s' %node.id
+
 
 	def visit_FunctionDef(self, node):
+		if self._with_go:
+			self._visit_genfunc_go(node)
+		else:
+			self._visit_genfunc_js(node)
+
+
+	def _visit_genfunc_go(self, node):
+		writer.write('class %s:' %node.name)
+		writer.push()  ## push class
+
+
+		typedefs = dict()
+		stypes = dict()  ## go struct
+		return_type = None
+		for decorator in reversed(node.decorator_list):
+			if isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Name) and decorator.func.id == 'returns':
+				if decorator.keywords:
+					raise SyntaxError('invalid go return type')
+				elif isinstance(decorator.args[0], ast.Name):
+					return_type = decorator.args[0].id
+				else:
+					return_type = decorator.args[0].s
+
+			elif isinstance(decorator, Call) and decorator.func.id in ('typedef', 'typedef_chan'):
+				c = decorator
+				assert len(c.args) == 0 and len(c.keywords)
+				for kw in c.keywords:
+					#assert isinstance( kw.value, Name)
+					kwval = kw.value.id
+					#self._typedef_vars[ kw.arg ] = kwval
+					#self._instances[ kw.arg ] = kwval
+					#self._func_typedefs[ kw.arg ] = kwval
+					#local_typedefs.append( '%s=%s' %(kw.arg, kwval))
+					if decorator.func.id=='typedef_chan':
+						#typedef_chans.append( kw.arg )
+						writer.write('@__typedef_chan__(%s=%s)' %(kw.arg, kwval))
+					else:
+						typedefs[ kw.arg ] = kwval
+						stypes[ kw.arg ] = kwval
+
+		assert return_type
+		args = [a.id for a in node.args.args]
+
+		for name in typedefs:
+			kwval = typedefs[name]
+			writer.write('@__typedef__(%s=%s)' %(name, kwval))
+
+		writer.write('def __init__(self, %s):' %','.join(args))
+		writer.push()
+		for arg in args:
+			assert arg in typedefs
+			writer.write('self.%s = %s'%(arg,arg))
+
+		self._in_head = True
+		loop_node = None
+		tail_yield = []
+		for b in node.body:
+			if loop_node:
+				tail_yield.append( b )
+
+			elif isinstance(b, ast.For):
+				iter_start = '0'
+				iter = b.iter
+				if isinstance(iter, ast.Call) and isinstance(iter.func, Name) and iter.func.id in ('range','xrange'):
+					if len(iter.args) == 2:
+						iter_start = self.visit(iter.args[0])
+						iter_end = self.visit(iter.args[1])
+					else:
+						iter_end = self.visit(iter.args[0])
+				else:
+					iter_end = self.visit(iter)
+
+				writer.write('self.__iter_start = %s'%iter_start)
+				writer.write('self.__iter_index = %s'%iter_start)
+				writer.write('self.__iter_end = %s'%iter_end)
+				writer.write('self.__done__ = 0')
+				loop_node = b
+				self._in_head = False
+
+			else:
+				if isinstance(b, ast.Assign) and isinstance(b.targets[0], ast.Name) and len(b.targets)==2:  ## typed local
+					stypes[ b.targets[1].id ] = b.targets[0].id
+				self.visit(b)
+
+		writer.pull()  ## end of init
+
+		## write typedef go struct ##
+
+		for intype in '__iter_start __iter_index __iter_end __done__'.split():
+			stypes[ intype ] = 'int'
+
+		writer.write('{')
+		for n in stypes:
+			writer.write( '%s : %s,' %(n, stypes[n]))
+		writer.write('}')
+
+		## iterator function `next`
+		writer.write('@returns(%s)' %return_type)
+		writer.write('def next(self):')
+		writer.push()
+
+		writer.write('inline("var __yield_return__ %s")' %return_type)
+
+		if self._head_yield:
+			writer.write('if self.__head_returned == 0:')
+			writer.push()
+			writer.write('self.__head_returned = 1')
+			writer.write('return self.__head_yield')
+			writer.pull()
+			writer.write('elif self.__iter_index < self.__iter_end:')
+
+		else:
+			writer.write('if self.__iter_index < self.__iter_end:')
+
+		writer.push()
+		for b in loop_node.body:
+			self.visit(b)
+
+		writer.write('self.__iter_index += 1')
+
+		if not tail_yield:
+			writer.write('if self.__iter_index == self.__iter_end: self.__done__ = 1')
+
+		writer.write('return __yield_return__')
+		writer.pull()
+		writer.write('else:')
+		writer.push()
+		writer.write('self.__done__ = 1')
+		if tail_yield:
+			for b in tail_yield:
+				self.visit(b)
+			writer.write('return __yield_return__')
+		writer.pull()
+
+		writer.pull()  ## end of next
+		writer.pull()  ## pull class
+
+
+	def _visit_genfunc_js(self, node):
 		args = [a.id for a in node.args.args]
 		writer.write('def %s(%s):' %(node.name, ','.join(args)))
 		writer.push()
@@ -3987,6 +4389,26 @@ def collect_calls(node):
 	return calls
 
 
+class CollectDictComprehensions(NodeVisitor):
+	_comps_ = []
+	def visit_GeneratorExp(self,node):
+		self._comps_.append( node )		
+		self.visit( node.elt )
+		for gen in node.generators:
+			self.visit( gen.iter )
+			self.visit( gen.target )
+	def visit_DictComp(self, node):
+		self._comps_.append( node )
+		self.visit( node.key )
+		self.visit( node.value )
+		for gen in node.generators:
+			self.visit( gen.iter )
+			self.visit( gen.target )
+
+def collect_dict_comprehensions(node):
+	CollectDictComprehensions._comps_ = comps = []
+	CollectDictComprehensions().visit( node )
+	return comps
 
 
 class CollectComprehensions(NodeVisitor):
@@ -4047,14 +4469,10 @@ def collect_generator_functions(node):
 
 
 
-def main(script, dart=False, coffee=False, lua=False, go=False, module_path=None):
+def main(script, **kwargs):
 	translator = PythonToPythonJS(
 		source = script, 
-		dart   = dart or '--dart' in sys.argv,
-		coffee = coffee,
-		lua    = lua,
-		go     = go,
-		module_path = module_path
+		**kwargs
 	)
 
 	code = writer.getvalue()
